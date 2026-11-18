@@ -694,17 +694,17 @@ TEST_F(UnrollProcTest, PredicatedReceives) {
   pb.Next(tok, final_tok);
   XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build());
 
-  BValue act_read_1 = fb.Param("do_read_ch_act0_read", p->GetBitsType(1));
   BValue read_1 = fb.Param("bar_ch_act0_read", p->GetBitsType(4));
+  BValue act_read_1 = fb.Param("do_read_ch_act0_read", p->GetBitsType(1));
   BValue act_write_1 = fb.Param("do_write_ch_act0_read", p->GetBitsType(1));
-  BValue act_read_2 = fb.Param("do_read_ch_act1_read", p->GetBitsType(1));
   BValue read_2 = fb.Param("bar_ch_act1_read", p->GetBitsType(4));
+  BValue act_read_2 = fb.Param("do_read_ch_act1_read", p->GetBitsType(1));
   BValue act_write_2 = fb.Param("do_write_ch_act1_read", p->GetBitsType(1));
-  BValue act_read_3 = fb.Param("do_read_ch_act2_read", p->GetBitsType(1));
   BValue read_3 = fb.Param("bar_ch_act2_read", p->GetBitsType(4));
+  BValue act_read_3 = fb.Param("do_read_ch_act2_read", p->GetBitsType(1));
   BValue act_write_3 = fb.Param("do_write_ch_act2_read", p->GetBitsType(1));
-  BValue act_read_4 = fb.Param("do_read_ch_act3_read", p->GetBitsType(1));
   BValue read_4 = fb.Param("bar_ch_act3_read", p->GetBitsType(4));
+  BValue act_read_4 = fb.Param("do_read_ch_act3_read", p->GetBitsType(1));
   BValue act_write_4 = fb.Param("do_write_ch_act3_read", p->GetBitsType(1));
   BValue lit_zero = fb.Literal(UBits(0, 4));
   BValue st_1 = fb.Literal(UBits(1, 4));
@@ -734,6 +734,250 @@ TEST_F(UnrollProcTest, PredicatedReceives) {
   RecordProperty("proc", proc->DumpIr());
   RecordProperty("converted", converted->DumpIr());
   EXPECT_THAT(TryProveEquivalence(f, converted), IsOkAndHolds(IsProvenTrue()));
+}
+
+TEST_F(UnrollProcTest, PredicatedNonBlockingReceive) {
+  auto p = CreatePackage();
+  ProcBuilder pb(absl::StrCat(TestName(), "_proc"), p.get());
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto pred_ch, p->CreateStreamingChannel(
+                        "a_pred", ChannelOps::kReceiveOnly, p->GetBitsType(1)));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto data_ch, p->CreateStreamingChannel(
+                        "b_data", ChannelOps::kReceiveOnly, p->GetBitsType(4)));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto out_ch,
+      p->CreateStreamingChannel(
+          "out", ChannelOps::kSendOnly,
+          p->GetTupleType({p->GetBitsType(1), p->GetBitsType(4)})));
+  BValue tok = pb.ReadStateElement("tok", Value::Token());
+  BValue pred_recv = pb.Receive(pred_ch, tok);
+  BValue data_recv = pb.ReceiveIfNonBlocking(
+      data_ch, pb.TupleIndex(pred_recv, 0), pb.TupleIndex(pred_recv, 1));
+  BValue final_tok = pb.Send(
+      out_ch, pb.TupleIndex(data_recv, 0),
+      pb.Tuple({pb.TupleIndex(data_recv, 2), pb.TupleIndex(data_recv, 1)}));
+  pb.Next(tok, final_tok);
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build());
+
+  FunctionBuilder fb(absl::StrCat(TestName(), "_func"), p.get());
+  BValue lit_zero = fb.Literal(UBits(0, 4));
+  auto make_activation = [&](int64_t act) {
+    BValue pred = fb.Param(absl::StrCat("pred_", act), p->GetBitsType(1));
+    BValue exec = fb.Param(absl::StrCat("exec_", act), p->GetBitsType(1));
+    BValue data = fb.Param(absl::StrCat("data_", act), p->GetBitsType(4));
+    BValue valid = fb.And(pred, exec);
+    BValue out_data = fb.Select(valid, data, lit_zero);
+    return fb.Tuple(
+        {fb.Tuple({fb.Literal(UBits(1, 1)), fb.Tuple({valid, out_data})})});
+  };
+  fb.Tuple({make_activation(0), make_activation(1)});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * converted,
+                           UnrollProcToFunction(proc, /*activation_count=*/2,
+                                                /*include_state=*/false));
+  EXPECT_THAT(TryProveEquivalence(f, converted), IsOkAndHolds(IsProvenTrue()));
+}
+
+TEST_F(UnrollProcTest, UnpredicatedNonBlockingReceiveDefaultsToZero) {
+  auto p = CreatePackage();
+  ProcBuilder pb(absl::StrCat(TestName(), "_proc"), p.get());
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto data_ch, p->CreateStreamingChannel("in_ch", ChannelOps::kReceiveOnly,
+                                              p->GetBitsType(4)));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto out_ch,
+      p->CreateStreamingChannel(
+          "out_ch", ChannelOps::kSendOnly,
+          p->GetTupleType({p->GetBitsType(1), p->GetBitsType(4)})));
+  BValue tok = pb.ReadStateElement("tok", Value::Token());
+  BValue recv = pb.ReceiveNonBlocking(data_ch, tok);
+  BValue final_tok =
+      pb.Send(out_ch, pb.TupleIndex(recv, 0),
+              pb.Tuple({pb.TupleIndex(recv, 2), pb.TupleIndex(recv, 1)}));
+  pb.Next(tok, final_tok);
+  XLS_ASSERT_OK_AND_ASSIGN(Proc * proc, pb.Build());
+
+  FunctionBuilder fb(absl::StrCat(TestName(), "_func"), p.get());
+  BValue lit_zero = fb.Literal(UBits(0, 4));
+  auto make_activation = [&](int64_t act) {
+    BValue valid = fb.Param(absl::StrCat("valid_", act), p->GetBitsType(1));
+    BValue data = fb.Param(absl::StrCat("data_", act), p->GetBitsType(4));
+    BValue out_data = fb.Select(valid, data, lit_zero);
+    return fb.Tuple(
+        {fb.Tuple({fb.Literal(UBits(1, 1)), fb.Tuple({valid, out_data})})});
+  };
+  fb.Tuple({make_activation(0), make_activation(1)});
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f, fb.Build());
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * converted,
+                           UnrollProcToFunction(proc, /*activation_count=*/2,
+                                                /*include_state=*/false));
+  EXPECT_THAT(TryProveEquivalence(f, converted), IsOkAndHolds(IsProvenTrue()));
+}
+
+TEST_F(UnrollProcTest, ReceiveParamOrderIndependentOfNodeOrder) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto ch_a, p->CreateStreamingChannel("in_a", ChannelOps::kReceiveOnly,
+                                           p->GetBitsType(4)));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto ch_b, p->CreateStreamingChannel("in_b", ChannelOps::kReceiveOnly,
+                                           p->GetBitsType(4)));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto out_ch, p->CreateStreamingChannel("out", ChannelOps::kSendOnly,
+                                             p->GetBitsType(4)));
+
+  Proc* proc_ab;
+  {
+    ProcBuilder pb(absl::StrCat(TestName(), "_ab"), p.get());
+    BValue tok = pb.ReadStateElement("tok", Value::Token());
+    BValue recv_a = pb.Receive(ch_a, tok);
+    BValue recv_b = pb.Receive(ch_b, tok);
+    BValue val =
+        pb.Add(pb.TupleIndex(recv_a, 1),
+               pb.Shll(pb.TupleIndex(recv_b, 1), pb.Literal(UBits(1, 2))));
+    BValue out_tok = pb.Send(
+        out_ch,
+        pb.AfterAll({pb.TupleIndex(recv_a, 0), pb.TupleIndex(recv_b, 0)}), val);
+    pb.Next(tok, out_tok);
+    XLS_ASSERT_OK_AND_ASSIGN(proc_ab, pb.Build());
+  }
+
+  Proc* proc_ba;
+  {
+    ProcBuilder pb(absl::StrCat(TestName(), "_ba"), p.get());
+    BValue tok = pb.ReadStateElement("tok", Value::Token());
+    BValue recv_b = pb.Receive(ch_b, tok);
+    BValue recv_a = pb.Receive(ch_a, tok);
+    // Commuting the Add operands and AfterAll order changes DFS traversal order
+    // without changing proc semantics.
+    BValue val =
+        pb.Add(pb.Shll(pb.TupleIndex(recv_b, 1), pb.Literal(UBits(1, 2))),
+               pb.TupleIndex(recv_a, 1));
+    BValue out_tok = pb.Send(
+        out_ch,
+        pb.AfterAll({pb.TupleIndex(recv_b, 0), pb.TupleIndex(recv_a, 0)}), val);
+    pb.Next(tok, out_tok);
+    XLS_ASSERT_OK_AND_ASSIGN(proc_ba, pb.Build());
+  }
+
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f_ab,
+                           UnrollProcToFunction(proc_ab, /*activation_count=*/2,
+                                                /*include_state=*/false));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * f_ba,
+                           UnrollProcToFunction(proc_ba, /*activation_count=*/2,
+                                                /*include_state=*/false));
+  EXPECT_THAT(TryProveEquivalence(f_ab, f_ba), IsOkAndHolds(IsProvenTrue()));
+}
+
+TEST_F(UnrollProcTest, NonBlockingReceiveParamCountIndependentOfReceiveNodes) {
+  auto p = CreatePackage();
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto pred_ch, p->CreateStreamingChannel(
+                        "a_pred", ChannelOps::kReceiveOnly, p->GetBitsType(1)));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto data_ch, p->CreateStreamingChannel(
+                        "b_data", ChannelOps::kReceiveOnly, p->GetBitsType(4)));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      auto out_ch,
+      p->CreateStreamingChannel(
+          "out", ChannelOps::kSendOnly,
+          p->GetTupleType({p->GetBitsType(1), p->GetBitsType(4)})));
+
+  Proc* single_recv;
+  {
+    ProcBuilder pb(absl::StrCat(TestName(), "_single"), p.get());
+    BValue tok = pb.ReadStateElement("tok", Value::Token());
+    BValue pred = pb.Receive(pred_ch, tok);
+    BValue recv = pb.ReceiveNonBlocking(data_ch, pb.TupleIndex(pred, 0));
+    BValue out_tok =
+        pb.Send(out_ch, pb.TupleIndex(recv, 0),
+                pb.Tuple({pb.TupleIndex(recv, 2), pb.TupleIndex(recv, 1)}));
+    pb.Next(tok, out_tok);
+    XLS_ASSERT_OK_AND_ASSIGN(single_recv, pb.Build());
+  }
+
+  Proc* split_recv;
+  {
+    ProcBuilder pb(absl::StrCat(TestName(), "_split"), p.get());
+    BValue tok = pb.ReadStateElement("tok", Value::Token());
+    BValue pred = pb.Receive(pred_ch, tok);
+    BValue cond = pb.TupleIndex(pred, 1);
+    BValue recv_t =
+        pb.ReceiveIfNonBlocking(data_ch, pb.TupleIndex(pred, 0), cond);
+    BValue recv_f =
+        pb.ReceiveIfNonBlocking(data_ch, pb.TupleIndex(pred, 0), pb.Not(cond));
+    BValue valid =
+        pb.Select(cond, pb.TupleIndex(recv_t, 2), pb.TupleIndex(recv_f, 2));
+    BValue data =
+        pb.Select(cond, pb.TupleIndex(recv_t, 1), pb.TupleIndex(recv_f, 1));
+    BValue out_tok = pb.Send(
+        out_ch,
+        pb.AfterAll({pb.TupleIndex(recv_t, 0), pb.TupleIndex(recv_f, 0)}),
+        pb.Tuple({valid, data}));
+    pb.Next(tok, out_tok);
+    XLS_ASSERT_OK_AND_ASSIGN(split_recv, pb.Build());
+  }
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Function * f_single,
+      UnrollProcToFunction(single_recv, /*activation_count=*/2,
+                           /*include_state=*/false));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Function * f_split,
+      UnrollProcToFunction(split_recv, /*activation_count=*/2,
+                           /*include_state=*/false));
+  EXPECT_THAT(TryProveEquivalence(f_single, f_split),
+              IsOkAndHolds(IsProvenTrue()));
+}
+
+TEST_F(UnrollProcTest, NewStyleProcWithInstantiationFails) {
+  auto p = CreatePackage();
+  Type* u32 = p->GetBitsType(32);
+  Proc* leaf_proc;
+  {
+    ProcBuilder pb(NewStyleProc{}, "leaf", p.get());
+    BSendChannel ch = pb.AddOutputChannel("out", u32);
+    pb.Send(ch, pb.Literal(Value::Token()), pb.Literal(UBits(0, 32)));
+    XLS_ASSERT_OK_AND_ASSIGN(leaf_proc, pb.Build());
+  }
+
+  // Wrapper proc with no local sends or state.
+  Proc* wrapper_proc;
+  {
+    ProcBuilder pb(NewStyleProc{}, "wrapper_proc", p.get());
+    BChannelWithInterfaces int_ch = pb.AddChannel("ch", u32);
+    pb.InstantiateProc("leaf_inst", leaf_proc, {int_ch.send_interface});
+    XLS_ASSERT_OK_AND_ASSIGN(wrapper_proc, pb.Build());
+  }
+
+  // Stateful proc that also instantiates a child proc.
+  Proc* stateful_parent;
+  {
+    ProcBuilder pb(NewStyleProc{}, "stateful_parent", p.get());
+    BChannelWithInterfaces int_ch = pb.AddChannel("ch", u32);
+    pb.InstantiateProc("leaf_inst", leaf_proc, {int_ch.send_interface});
+    BValue st = pb.ReadStateElement("cnt", UBits(0, 4));
+    pb.Next(st, pb.Add(st, pb.Literal(UBits(1, 4))));
+    XLS_ASSERT_OK_AND_ASSIGN(stateful_parent, pb.Build());
+  }
+
+  EXPECT_THAT(UnrollProcToFunction(wrapper_proc, /*activation_count=*/2,
+                                   /*include_state=*/false),
+              StatusIs(absl::StatusCode::kUnimplemented,
+                       testing::HasSubstr("proc instantiations")));
+  EXPECT_THAT(UnrollProcToFunction(stateful_parent, /*activation_count=*/2,
+                                   /*include_state=*/true),
+              StatusIs(absl::StatusCode::kUnimplemented,
+                       testing::HasSubstr("proc instantiations")));
+  EXPECT_THAT(
+      UnrollProcToUntimedFunction(stateful_parent, /*activation_count=*/2,
+                                  /*input_value_count=*/0,
+                                  /*output_value_count=*/2),
+      StatusIs(absl::StatusCode::kUnimplemented,
+               testing::HasSubstr("proc instantiations")));
 }
 
 TEST_F(UnrollProcTest, ConditionalReadNextStateNoOp) {
